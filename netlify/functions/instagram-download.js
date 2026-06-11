@@ -43,7 +43,7 @@ exports.handler = async function (event, context) {
   }
 
   try {
-    const apiUrl = `https://${API_HOST}/download?url=${encodeURIComponent(targetUrl)}`;
+    const apiUrl = `https://${API_HOST}/instagram/?url=${encodeURIComponent(targetUrl)}`;
     const response = await fetchWithRetry(apiUrl, {
       method: 'GET',
       headers: {
@@ -207,6 +207,13 @@ function normalizeProviderResponse(data) {
   }
 
   function scan(obj) {
+    if (obj.url && typeof obj.url === 'string') {
+  push(obj.url, 'HD', 'video');
+}
+
+if (obj.thumb && typeof obj.thumb === 'string') {
+  thumbnail = obj.thumb;
+}
     if (!obj || typeof obj !== 'object') return;
     title = title || obj.title || obj.caption || obj.description || '';
     thumbnail = thumbnail || obj.thumbnail || obj.thumbnail_url || obj.thumb || obj.cover || obj.image || '';
