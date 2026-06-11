@@ -1208,14 +1208,20 @@
     }
 
     async function fetchWithTimeout(url, timeout = 22000) {
+      console.log('[VOIDGRAB] fetchWithTimeout:', url.slice(0, 120));
       activeController = new AbortController();
       const timer = setTimeout(() => activeController.abort(), timeout);
       try {
         const res = await fetch(url, { signal: activeController.signal, headers: { Accept: 'application/json' } });
+        console.log('[VOIDGRAB] API response status:', res.status);
         const text = await res.text();
+        console.log('[VOIDGRAB] API response bytes:', text.length, '— first 300:', text.slice(0, 300));
         let data = {};
         try { data = text ? JSON.parse(text) : {}; } catch { throw new Error('Server returned invalid JSON.'); }
-        if (!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+        if (!res.ok || data.error) {
+          console.error('[VOIDGRAB] API error:', data.error || res.status, '| requestId:', data.requestId);
+          throw new Error(data.error || `Server error ${res.status}`);
+        }
         return data;
       } finally { clearTimeout(timer); activeController = null; }
     }
@@ -1281,29 +1287,67 @@
     }
 
     function normalize(data, sourceUrl) {
-      const base = data.normalized || data.result || data.data || data;
-      const links = [];
-      const scan = o => {
-        if (!o || typeof o !== 'object') return;
-        ['download_url','video_url','url','src','hd','sd'].forEach(k => {
-          if (typeof o[k] === 'string' && /^https?:/.test(o[k]) && !/instagram\.com\/(reel|p|tv)\//.test(o[k]))
-            links.push({ url: o[k], quality: o.quality || o.label || k.toUpperCase(), type: o.type || 'video' });
-        });
-        ['links','versions','medias','media','videos','items'].forEach(k =>
-          Array.isArray(o[k]) && o[k].forEach(x => typeof x === 'string' ? links.push({ url: x, quality: 'HD', type: 'video' }) : scan(x))
+      console.log('[VOIDGRAB] normalize() raw data keys:', Object.keys(data || {}).join(', '));
+
+      // Prefer server-side normalized field (already deduped and filtered)
+      if (data.normalized && Array.isArray(data.normalized.links) && data.normalized.links.length) {
+        console.log('[VOIDGRAB] Using server normalized field, links:', data.normalized.links.length);
+        data.normalized.links.forEach((l, i) =>
+          console.log('[VOIDGRAB]   link[' + i + ']', l.quality, l.type, (l.url || '').slice(0, 80))
         );
+        return {
+          sourceUrl,
+          title:     data.normalized.title     || 'Instagram Reel',
+          thumbnail: data.normalized.thumbnail || '',
+          duration:  data.normalized.duration  || '—',
+          fileSize:  data.normalized.fileSize  || 'Calculated on download',
+          quality:   data.normalized.quality   || 'HD',
+          links:     data.normalized.links,
+        };
+      }
+
+      // Fallback: scan raw response structure
+      console.warn('[VOIDGRAB] No server normalized field — falling back to client scan');
+      const base = data.result || data.data || data;
+      const links = [];
+      const seen = new Set();
+
+      const scan = o => {
+        if (!o || typeof o !== 'object') return; // NULL GUARD FIRST
+        ['download_url', 'video_url', 'url', 'src', 'hd', 'sd'].forEach(k => {
+          const v = o[k];
+          if (typeof v === 'string' && /^https?:/i.test(v) && !seen.has(v) && !/instagram\.com\/(reel|p|tv)\//i.test(v)) {
+            seen.add(v);
+            links.push({ url: v, quality: o.quality || o.label || k.toUpperCase(), type: o.type || 'video' });
+          }
+        });
+        ['links', 'versions', 'medias', 'media', 'videos', 'items', 'resources'].forEach(k => {
+          if (Array.isArray(o[k])) {
+            o[k].forEach(x => {
+              if (typeof x === 'string' && /^https?:/i.test(x) && !seen.has(x)) {
+                seen.add(x);
+                links.push({ url: x, quality: 'HD', type: 'video' });
+              } else {
+                scan(x);
+              }
+            });
+          }
+        });
       };
+
       Array.isArray(base) ? base.forEach(scan) : scan(base);
-      const unique = links.filter((l, i, a) => l.url && a.findIndex(x => x.url === l.url) === i);
-      if (!unique.length) throw new Error('No downloadable media found. The Reel may be private, expired, or unavailable.');
+      console.log('[VOIDGRAB] Client scan found', links.length, 'links');
+      links.forEach((l, i) => console.log('[VOIDGRAB]   link[' + i + ']', l.quality, l.type, (l.url || '').slice(0, 80)));
+
+      if (!links.length) throw new Error('No downloadable media found. The Reel may be private, expired, or unavailable.');
       return {
         sourceUrl,
-        title: data.title || base.title || base.caption || 'Instagram Reel',
+        title:     data.title || base.title || base.caption || 'Instagram Reel',
         thumbnail: data.thumbnail || base.thumbnail || base.thumb || base.cover || base.image || '',
-        duration: data.duration || base.duration || '—',
-        fileSize: data.fileSize || base.file_size || 'Calculated on download',
-        quality: unique[0].quality || 'HD',
-        links: unique
+        duration:  data.duration || base.duration || '—',
+        fileSize:  data.fileSize || base.file_size || 'Calculated on download',
+        quality:   links[0].quality || 'HD',
+        links,
       };
     }
 
@@ -1350,25 +1394,141 @@
       resultEl.classList.add('show');
     }
 
+    // ---------------------------------------------------------------------------
+    // downloadMedia — multi-strategy download with full error handling.
+    //
+    // Strategy 1: Server proxy (/.netlify/functions/instagram-download?proxy=1)
+    //   — Rewrites the Referer/Origin headers so the Instagram CDN accepts the
+    //     request. Returns the file as a blob. Works on all browsers.
+    //   — If the server returns 413 (FILE_TOO_LARGE) we skip straight to S3.
+    //   — If the server returns any other non-ok status we skip to S3.
+    //
+    // Strategy 2: Direct blob fetch
+    //   — Fetches the raw CDN URL from the browser. Works on desktop Chrome/FF
+    //     when CORS is open on the CDN. Fails silently on mobile or when the CDN
+    //     requires Instagram Referer (most of the time), so we only try this as
+    //     a secondary.
+    //
+    // Strategy 3: window.open fallback
+    //   — Opens the CDN URL in a new tab. The browser's built-in video player
+    //     will stream it and the user can long-press (mobile) or right-click
+    //     (desktop) to save. This ALWAYS works for public content.
+    //   — We also inject a visible banner so the user knows what to do.
+    // ---------------------------------------------------------------------------
     async function downloadMedia(encoded, filename, btn) {
       const url = decodeURIComponent(encoded);
-      const old = btn.textContent.trim();
-      btn.disabled = true; btn.textContent = 'Downloading…';
-      try {
-        const res = await fetch(`${FUNCTION_URL}?proxy=1&url=${encodeURIComponent(url)}`);
-        if (!res.ok) throw new Error('Proxy failed');
-        const blob = await res.blob();
+      const btnSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+      const oldHTML = btn.innerHTML;
+
+      console.log('[VOIDGRAB] downloadMedia called for:', url.slice(0, 80));
+
+      btn.disabled = true;
+      btn.innerHTML = `${btnSvg} Downloading…`;
+
+      // ── Helper: trigger blob download ──────────────────────────────────────
+      function triggerBlobDownload(blob, fname) {
         const chip = document.getElementById('file-size-chip');
         if (chip) chip.textContent = '💾 ' + (blob.size / 1024 / 1024).toFixed(1) + ' MB';
         const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = blobUrl; a.download = filename;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 12000);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fname;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      }
+
+      // ── Helper: show inline fallback banner ────────────────────────────────
+      function showFallbackBanner(openedTab) {
+        const existing = document.getElementById('vg-fallback-banner');
+        if (existing) existing.remove();
+        const banner = document.createElement('div');
+        banner.id = 'vg-fallback-banner';
+        banner.style.cssText = 'margin-top:12px;padding:12px 16px;background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.3);border-radius:10px;font-size:13px;line-height:1.5;color:var(--text-2,#aaa);';
+        banner.innerHTML = openedTab
+          ? '📂 <strong>Video opened in a new tab.</strong><br>On <strong>mobile</strong>: tap the ⋮ menu → <em>Download</em>, or long-press the video → <em>Save video</em>.<br>On <strong>desktop</strong>: right-click the video → <em>Save video as…</em>'
+          : '⚠️ <strong>Automatic download blocked by your browser.</strong><br>Tap <strong>Copy Direct Link</strong> below, then open it in a new tab and save the video from there.';
+        const actionsEl = btn.closest('.result-actions');
+        if (actionsEl) actionsEl.after(banner);
+      }
+
+      // ── Strategy 1: Server proxy ───────────────────────────────────────────
+      try {
+        console.log('[VOIDGRAB] Strategy 1: server proxy');
+        const proxyUrl = `${FUNCTION_URL}?proxy=1&url=${encodeURIComponent(url)}`;
+        const res = await fetch(proxyUrl);
+
+        console.log('[VOIDGRAB] Proxy response status:', res.status, 'content-type:', res.headers.get('content-type'));
+
+        if (res.status === 413) {
+          // File too large for proxy — server told us explicitly, skip to fallback
+          const errData = await res.json().catch(() => ({}));
+          console.warn('[VOIDGRAB] Proxy 413 FILE_TOO_LARGE:', errData.message);
+          throw Object.assign(new Error(errData.message || 'File too large for proxy'), { skipDirect: true });
+        }
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          console.warn('[VOIDGRAB] Proxy non-ok:', res.status, errData.error);
+          throw new Error(errData.error || `Proxy returned ${res.status}`);
+        }
+
+        const contentType = res.headers.get('content-type') || '';
+        // Sanity check: if the proxy returned JSON instead of binary, something went wrong
+        if (contentType.includes('application/json')) {
+          const errData = await res.json().catch(() => ({}));
+          console.warn('[VOIDGRAB] Proxy returned JSON unexpectedly:', errData);
+          throw new Error(errData.error || 'Proxy returned unexpected JSON');
+        }
+
+        const blob = await res.blob();
+        console.log('[VOIDGRAB] Proxy blob size:', blob.size, 'type:', blob.type);
+
+        if (blob.size < 1024) {
+          // Suspiciously small — likely an error body, not a video
+          const text = await blob.text().catch(() => '');
+          console.warn('[VOIDGRAB] Proxy blob too small, likely error:', text.slice(0, 200));
+          throw new Error('Proxy returned an incomplete file');
+        }
+
+        triggerBlobDownload(blob, filename);
         toast('Download started!', 'ok');
-      } catch (e) {
-        toast('Opening fallback…', 'err');
-        window.open(url, '_blank', 'noopener');
-      } finally { btn.disabled = false; btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> ${old}`; }
+        btn.disabled = false;
+        btn.innerHTML = `${btnSvg} Download HD Video`;
+        return;
+
+      } catch (proxyErr) {
+        console.warn('[VOIDGRAB] Strategy 1 failed:', proxyErr.message);
+
+        // ── Strategy 2: Direct blob fetch (desktop Chrome/FF only) ──────────
+        if (!proxyErr.skipDirect) {
+          try {
+            console.log('[VOIDGRAB] Strategy 2: direct blob fetch');
+            const directRes = await fetch(url, { mode: 'cors' });
+            if (!directRes.ok) throw new Error(`Direct fetch ${directRes.status}`);
+            const blob = await directRes.blob();
+            if (blob.size < 1024) throw new Error('Direct blob too small');
+            console.log('[VOIDGRAB] Direct blob size:', blob.size);
+            triggerBlobDownload(blob, filename);
+            toast('Download started!', 'ok');
+            btn.disabled = false;
+            btn.innerHTML = `${btnSvg} Download HD Video`;
+            return;
+          } catch (directErr) {
+            console.warn('[VOIDGRAB] Strategy 2 failed:', directErr.message);
+          }
+        }
+      }
+
+      // ── Strategy 3: window.open fallback ──────────────────────────────────
+      console.log('[VOIDGRAB] Strategy 3: window.open fallback');
+      toast('Opening video — save it from the new tab', 'err');
+      const newTab = window.open(url, '_blank', 'noopener,noreferrer');
+      showFallbackBanner(!!newTab);
+      btn.disabled = false;
+      btn.innerHTML = `${btnSvg} Download HD Video`;
     }
 
     async function copyDirect(encoded) {
