@@ -213,6 +213,13 @@ function normalizeProviderResponse(data) {
 
 if (obj.thumb && typeof obj.thumb === 'string') {
   thumbnail = obj.thumb;
+  if (obj.type && obj.type.includes('video')) {
+    push(obj.url, 'HD', 'video');
+  }
+
+  if (obj.size) {
+    fileSize = obj.size;
+  }
 }
     if (!obj || typeof obj !== 'object') return;
     title = title || obj.title || obj.caption || obj.description || '';
