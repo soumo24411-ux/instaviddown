@@ -4,7 +4,7 @@
 //   ?url=<instagram_url>     -> fetch media links from RapidAPI
 //   ?proxy=1&url=<media_url> -> proxy media as a forced download
 
-const API_HOST = 'instagram-reels-downloader-api.p.rapidapi.com';
+const API_HOST = 'instagram-post-reels-stories-downloader-api.p.rapidapi.com';
 const API_TIMEOUT_MS = 18000;
 const PROXY_TIMEOUT_MS = 26000;
 
