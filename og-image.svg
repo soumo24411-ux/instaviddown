@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">VOIDGRAB Instagram Reel Downloader</title>
+  <desc id="desc">Cyberpunk VOIDGRAB social preview graphic.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070711"/>
+      <stop offset=".55" stop-color="#111128"/>
+      <stop offset="1" stop-color="#05050a"/>
+    </linearGradient>
+    <radialGradient id="pulse" cx=".28" cy=".28" r=".8">
+      <stop offset="0" stop-color="#8f5cff" stop-opacity=".8"/>
+      <stop offset=".5" stop-color="#8f5cff" stop-opacity=".14"/>
+      <stop offset="1" stop-color="#8f5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#pulse)"/>
+  <g stroke="#ffffff" stroke-opacity=".08">
+    <path d="M0 105h1200M0 210h1200M0 315h1200M0 420h1200M0 525h1200"/>
+    <path d="M120 0v630M240 0v630M360 0v630M480 0v630M600 0v630M720 0v630M840 0v630M960 0v630M1080 0v630"/>
+  </g>
+  <rect x="70" y="76" width="1060" height="478" fill="#0f0f22" fill-opacity=".74" stroke="#8f5cff" stroke-opacity=".5"/>
+  <text x="110" y="156" fill="#ffffff" font-size="34" font-family="Arial, sans-serif" font-weight="700" letter-spacing="8">VOID<tspan fill="#8f5cff">GRAB</tspan></text>
+  <text x="110" y="288" fill="#ffffff" font-size="78" font-family="Arial, sans-serif" font-weight="800">Download Instagram</text>
+  <text x="110" y="376" fill="#8f5cff" font-size="78" font-family="Arial, sans-serif" font-weight="800">Reels in HD</text>
+  <text x="112" y="452" fill="#00ffb2" font-size="30" font-family="monospace">Fast • Free • No Watermark • No Login</text>
+</svg>
